@@ -47,18 +47,17 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
                 write_capacity_units: 10
             }
         })
-        puts "#{result.to_h}"
+
         # wait here for the table to be ready
         (1..10).each do |i|
             sleep i
             rsp = db.describe_table({
                 table_name: table
             })
-            puts "#{rsp.to_h}"
             return true if rsp.to_h[:table][:table_status] == 'ACTIVE'
         end
     rescue => e
-        puts "EXCEPTION #{e}"
+        @logger.error "logstash-input-multirds ensure_lock_table exception\n #{e}"
         return false
     end
     return false
@@ -79,7 +78,7 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
             condition_expression: "attribute_not_exists(lock_owner) OR lock_owner = :lock_owner OR expires < :expires"
         })
     rescue => e
-        puts "EXCEPTION: #{e}"
+      @logger.error "logstash-input-multirds acquire_lock exception\n #{e}"
     end
   end
   def get_logfile_list(rds, instance_pattern, logfile_pattern)
@@ -88,11 +87,10 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
       dbs = rds.describe_db_instances
       dbs.to_h[:db_instances].each do |db|
           next unless db[:db_instance_identifier] =~ /#{instance_pattern}/
-          # puts "#{db}"
           logs = rds.describe_db_log_files({
               db_instance_identifier: db[:db_instance_identifier]
           })
-          # puts "#{logs.to_h[:describe_db_log_files]}"
+
           logs.to_h[:describe_db_log_files].each do |log|
               next unless log[:log_file_name] =~ /#{logfile_pattern}/
               log[:db_instance_identifier] = db[:db_instance_identifier]
@@ -100,7 +98,7 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
           end
       end
     rescue => e
-      @logger.error "multi-rds failed getting list of DBs or logfiles instance_pattern: #{instance_pattern} logfile_pattern:#{logfile_pattern}\n#{e}"
+      @logger.error "logstash-input-multirds get_logfile_list instance_pattern: #{instance_pattern} logfile_pattern:#{logfile_pattern} exception \n#{e}"
     end
     log_files
 end
@@ -132,7 +130,7 @@ end
   def register
     @client_id = "#{Socket.gethostname}:#{java.util::UUID.randomUUID.to_s}" unless @client_id
     @logger.info "Registering multi-rds input", :instance_name_pattern => @instance_name_pattern, :log_file_name_pattern => @log_file_name_pattern, :group_name => @group_name, :region => @region, :client_id => @client_id
-    @logger.info "aws_options_hash #{aws_options_hash}"
+
     @db = Aws::DynamoDB::Client.new aws_options_hash
     @rds = Aws::RDS::Client.new aws_options_hash
 
@@ -147,7 +145,7 @@ end
     @thread = Thread.current
     Stud.interval(@polling_frequency) do
       logs = get_logfile_list @rds, @instance_name_pattern, @log_file_name_pattern
-      @logger.info "Found logfiles #{logs}"
+
       logs.each do |log|
         id = "#{log[:db_instance_identifier]}:#{log[:log_file_name]}"
         lock = acquire_lock @db, @group_name, id, @client_id
@@ -165,9 +163,6 @@ end
                 log_file_name: log[:log_file_name],
                 marker: rec[:marker],
             )
-
-            # puts "#{rsp}"
-            @logger.info "#{rsp}"
             rsp[:log_file_data].lines.each do |line|
               @codec.decode(line) do |event|
                 decorate event
@@ -179,41 +174,11 @@ end
             more = rsp[:additional_data_pending]
             marker = rsp[:marker] 
         end
+        # set the marker back in the lock table
         set_logfile_record @db, id, @group_name, 'marker', marker
       end
     end
-    # @thread = Thread.current
-    # Stud.interval(@polling_frequency) do
-    #   @logger.debug "finding #{@log_file_name} for #{@instance_name} starting #{@sincedb.read} (#{@sincedb.read.to_i * 1000})"
-    #   begin
-    #     logfiles = @database.log_files({
-    #       filename_contains: @log_file_name,
-    #       file_last_written: @sincedb.read.to_i * 1000,
-    #     })
-    #     logfiles.each do |logfile|
-    #       @logger.debug "downloading #{logfile.name} for #{@instance_name}"
-    #       more = true
-    #       marker = "0"
-    #       while more do
-    #         response = logfile.download({marker: marker})
-    #         response[:log_file_data].lines.each do |line|
-    #           @codec.decode(line) do |event|
-    #             decorate event
-    #             event.set "rds_instance", @instance_name
-    #             event.set "log_file", @log_file_name
-    #             queue << event
-    #           end
-    #         end
-    #         more = response[:additional_data_pending]
-    #         marker = response[:marker]
-    #       end
-    #       @sincedb.write (filename2datetime logfile.name)
-    #     end
-    #   rescue Aws::RDS::Errors::ServiceError
-    #     # the next iteration will resume at the same location
-    #     @logger.warn "caught AWS service error"
-    #   end
-    # end
+
   end
 
   def stop
