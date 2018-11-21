@@ -21,6 +21,7 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
   config :polling_frequency, :validate => :number, :default => 600
   config :group_name, :validate => :string, :required => true
   config :client_id, :validate => :string
+  
   def ensure_lock_table(db, table)
     begin
         tables = db.list_tables({
