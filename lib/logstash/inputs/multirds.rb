@@ -3,7 +3,7 @@ require "logstash/inputs/base"
 require "logstash/namespace"
 require "stud/interval"
 require "aws-sdk"
-require "logstash/inputs/rds/patch"
+require "logstash/inputs/multirds/patch"
 require "logstash/plugin_mixins/aws_config"
 require "time"
 
@@ -26,9 +26,10 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
     # @database = Aws::RDS::DBInstance.new @instance_name, aws_options_hash
     # path = @sincedb_path || File.join(ENV["HOME"], ".sincedb_" + Digest::MD5.hexdigest("#{@instance_name}+#{@log_file_name}"))
     # @sincedb = SinceDB::File.new path
-    @logger.info "Registering multi-rds input", :instance_name_pattern => @instance_name_pattern, :log_file_name_pattern => @log_file_name_pattern, :group_name = @group_name
-    @db = Aws::DynamoDB::Client.new
-    @rds = Aws::RDS::Client.new
+    @logger.info "Registering multi-rds input", :instance_name_pattern => @instance_name_pattern, :log_file_name_pattern => @log_file_name_pattern, :group_name => @group_name, :region => @region
+    @logger.info "aws_options_hash #{aws_options_hash}"
+    @db = Aws::DynamoDB::Client.new aws_options_hash
+    @rds = Aws::RDS::Client.new aws_options_hash
     # TODO: Auto-create dynamodb table here -- should that be a param? 
   end
 
