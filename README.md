@@ -4,7 +4,8 @@ Forked from discourse/logstash-input-rds I needed competing consumer and multi-d
     input {
       rds {
         region => "us-west-2"
-        instance_name => "development"
-        log_file_name => "error/postgresql.log"
+        instance_name_pattern => ".*"
+        log_file_name_pattern => ".*"
+        group_name => "rds"
       }
     }

@@ -16,17 +16,20 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
   milestone 1
   default :codec, "plain"
 
-  config :instance_name, :validate => :string, :required => true
-  config :log_file_name, :validate => :string, :required => true
+  config :instance_name_pattern, :validate => :string, :required => true
+  config :log_file_name_pattern, :validate => :string, :required => true
   config :polling_frequency, :validate => :number, :default => 600
-  config :sincedb_path, :validate => :string, :default => nil
-
+  config :group_name, :validate => :string, :required => true
+  
   def register
-    @logger.info "Registering multi-RDS input", :region => @region, :instance => @instance_name, :log_file => @log_file_name
-    @database = Aws::RDS::DBInstance.new @instance_name, aws_options_hash
-
-    path = @sincedb_path || File.join(ENV["HOME"], ".sincedb_" + Digest::MD5.hexdigest("#{@instance_name}+#{@log_file_name}"))
-    @sincedb = SinceDB::File.new path
+    # @logger.info "Registering multi-RDS input", :region => @region, :instance => @instance_name, :log_file => @log_file_name
+    # @database = Aws::RDS::DBInstance.new @instance_name, aws_options_hash
+    # path = @sincedb_path || File.join(ENV["HOME"], ".sincedb_" + Digest::MD5.hexdigest("#{@instance_name}+#{@log_file_name}"))
+    # @sincedb = SinceDB::File.new path
+    @logger.info "Registering multi-rds input", :instance_name_pattern => @instance_name_pattern, :log_file_name_pattern => @log_file_name_pattern, :group_name = @group_name
+    @db = Aws::DynamoDB::Client.new
+    @rds = Aws::RDS::Client.new
+    # TODO: Auto-create dynamodb table here -- should that be a param? 
   end
 
   def run(queue)
