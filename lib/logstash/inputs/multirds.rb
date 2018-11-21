@@ -6,7 +6,7 @@ require "aws-sdk"
 require "logstash/inputs/multirds/patch"
 require "logstash/plugin_mixins/aws_config"
 require "time"
-
+require "socket"
 Aws.eager_autoload!
 
 class LogStash::Inputs::Multirds < LogStash::Inputs::Base
@@ -16,11 +16,11 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
   milestone 1
   default :codec, "plain"
 
-  config :instance_name_pattern, :validate => :string, :required => true
-  config :log_file_name_pattern, :validate => :string, :required => true
+  config :instance_name_pattern, :validate => :string, :default => '.*'
+  config :log_file_name_pattern, :validate => :string, :default => '.*'
   config :polling_frequency, :validate => :number, :default => 600
   config :group_name, :validate => :string, :required => true
-
+  config :client_id, :validate => :string
   def ensure_lock_table(db, table)
     begin
         tables = db.list_tables({
@@ -63,16 +63,79 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
     end
     return false
   end
+  def acquire_lock(db, table, id, lock_owner, expire_time: 10)
+    begin
+        db.update_item({
+            key: {
+                id: id
+            },
+            table_name: table,
+            update_expression: "SET lock_owner = :lock_owner, expires = :expires",
+            expression_attribute_values: {
+                ':lock_owner' => lock_owner,
+                ':expires' =>  Time.now.utc.to_i + expire_time
+            },
+            return_values: "UPDATED_NEW",
+            condition_expression: "attribute_not_exists(lock_owner) OR lock_owner = :lock_owner OR expires < :expires"
+        })
+    rescue => e
+        puts "EXCEPTION: #{e}"
+    end
+  end
+  def get_logfile_list(rds, instance_pattern, logfile_pattern)
+    log_files = []
+    begin
+      dbs = rds.describe_db_instances
+      dbs.to_h[:db_instances].each do |db|
+          next unless db[:db_instance_identifier] =~ /#{instance_pattern}/
+          # puts "#{db}"
+          logs = rds.describe_db_log_files({
+              db_instance_identifier: db[:db_instance_identifier]
+          })
+          # puts "#{logs.to_h[:describe_db_log_files]}"
+          logs.to_h[:describe_db_log_files].each do |log|
+              next unless log[:log_file_name] =~ /#{logfile_pattern}/
+              log[:db_instance_identifier] = db[:db_instance_identifier]
+              log_files.push(log)
+          end
+      end
+    rescue => e
+      @logger.error "multi-rds failed getting list of DBs or logfiles instance_pattern: #{instance_pattern} logfile_pattern:#{logfile_pattern}\n#{e}"
+    end
+    log_files
+end
+def get_logfile_record(db, id, tablename)
+  res = db.get_item({
+      key: {
+          id: id
+      },
+      table_name: tablename
+  })
+  extra_fields = {'marker' => '0:0'}
+  extra_fields.merge(res.item)
+end
+def set_logfile_record(db, id, tablename, key, value)
+  db.update_item({
+      key: {
+          id: id
+      },
+      table_name: tablename,
+      update_expression: "SET #{key} = :v",
+      expression_attribute_values: {
+          ':v' => value
+      },
+      return_values: "UPDATED_NEW"
+  
+  })
+end
 
   def register
-    # @logger.info "Registering multi-RDS input", :region => @region, :instance => @instance_name, :log_file => @log_file_name
-    # @database = Aws::RDS::DBInstance.new @instance_name, aws_options_hash
-    # path = @sincedb_path || File.join(ENV["HOME"], ".sincedb_" + Digest::MD5.hexdigest("#{@instance_name}+#{@log_file_name}"))
-    # @sincedb = SinceDB::File.new path
-    @logger.info "Registering multi-rds input", :instance_name_pattern => @instance_name_pattern, :log_file_name_pattern => @log_file_name_pattern, :group_name => @group_name, :region => @region
+    @client_id = "#{Socket.gethostname}:#{java.util::UUID.randomUUID.to_s}" unless @client_id
+    @logger.info "Registering multi-rds input", :instance_name_pattern => @instance_name_pattern, :log_file_name_pattern => @log_file_name_pattern, :group_name => @group_name, :region => @region, :client_id => @client_id
     @logger.info "aws_options_hash #{aws_options_hash}"
     @db = Aws::DynamoDB::Client.new aws_options_hash
     @rds = Aws::RDS::Client.new aws_options_hash
+
     @ready = ensure_lock_table @db, @group_name
   end
 
@@ -83,7 +146,41 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
     end
     @thread = Thread.current
     Stud.interval(@polling_frequency) do
+      logs = get_logfile_list @rds, @instance_name_pattern, @log_file_name_pattern
+      @logger.info "Found logfiles #{logs}"
+      logs.each do |log|
+        id = "#{log[:db_instance_identifier]}:#{log[:log_file_name]}"
+        lock = acquire_lock @db, @group_name, id, @client_id
+        next unless lock # we won't do anything with the data unless we get a lock on the file
+        
+        rec = get_logfile_record @db, id, @group_name
+        next unless rec['marker'].split(':')[1].to_i < log[:size].to_i # No new data in the log file so just continue
 
+        # start reading log data at the marker
+        more = true
+        marker = rec[:marker]
+        while more do
+            rsp = @rds.download_db_log_file_portion(
+                db_instance_identifier: log[:db_instance_identifier],
+                log_file_name: log[:log_file_name],
+                marker: rec[:marker],
+            )
+
+            # puts "#{rsp}"
+            @logger.info "#{rsp}"
+            rsp[:log_file_data].lines.each do |line|
+              @codec.decode(line) do |event|
+                decorate event
+                event.set "rds_instance", log[:db_instance_identifier]
+                event.set "log_file", log[:log_file_name]
+                queue << event
+              end
+            end
+            more = rsp[:additional_data_pending]
+            marker = rsp[:marker] 
+        end
+        set_logfile_record @db, id, @group_name, 'marker', marker
+      end
     end
     # @thread = Thread.current
     # Stud.interval(@polling_frequency) do
@@ -120,7 +217,7 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
   end
 
   def stop
-    if @ready Stud.stop! @thread
+    Stud.stop! @thread
   end
 
   def filename2datetime(name)
