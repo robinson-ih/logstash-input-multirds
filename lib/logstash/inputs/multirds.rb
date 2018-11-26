@@ -62,8 +62,7 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
     end
     false
   end
-
-  def acquire_lock(db, table, id, lock_owner, expire_time: 10)
+  def acquire_lock(db, table, id, lock_owner, expire_time)
     begin
       db.update_item(
         key: {
@@ -76,7 +75,8 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
           ':expires' => Time.now.utc.to_i + expire_time
         },
         return_values: 'UPDATED_NEW',
-        condition_expression: 'attribute_not_exists(lock_owner) OR lock_owner = :lock_owner OR expires < :expires'
+        # condition_expression: 'attribute_not_exists(lock_owner) OR lock_owner = :lock_owner OR expires < :expires'
+        condition_expression: 'attribute_not_exists(lock_owner) OR expires < :expires'
       )
     # TODO: handle condition exception else throw error
     rescue Aws::DynamoDB::Errors::ConditionalCheckFailedException
@@ -156,7 +156,7 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
 
       logs.each do |log|
         id = "#{log[:db_instance_identifier]}:#{log[:log_file_name]}"
-        lock = acquire_lock @db, @group_name, id, @client_id
+        lock = acquire_lock @db, @group_name, id, @client_id, (@polling_frequency - 1)
         next unless lock # we won't do anything with the data unless we get a lock on the file
 
         rec = get_logfile_record @db, id, @group_name
