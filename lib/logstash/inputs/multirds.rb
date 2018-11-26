@@ -111,28 +111,39 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
   end
 
   def get_logfile_record(db, id, tablename)
-    res = db.get_item(
-      key: {
-        id: id
-      },
-      table_name: tablename
-    )
-    extra_fields = { 'marker' => '0:0' }
-    extra_fields.merge(res.item)
+    out = {}
+    begin
+      res = db.get_item(
+        key: {
+          id: id
+        },
+        table_name: tablename
+      )
+      extra_fields = { 'marker' => '0:0' }
+      out = extra_fields.merge(res.item)
+    rescue StandardError => e
+      @logger.error "logstash-input-multirds get_logfile_record  exception \n#{e}"
+    end
+    out
   end
 
   def set_logfile_record(db, id, tablename, key, value)
-    db.update_item(
-      key: {
-        id: id
-      },
-      table_name: tablename,
-      update_expression: "SET #{key} = :v",
-      expression_attribute_values: {
-        ':v' => value
-      },
-      return_values: 'UPDATED_NEW'
-    )
+    begin
+    out = db.update_item(
+        key: {
+          id: id
+        },
+        table_name: tablename,
+        update_expression: "SET #{key} = :v",
+        expression_attribute_values: {
+          ':v' => value
+        },
+        return_values: 'UPDATED_NEW'
+      )
+    rescue StandardError => e
+      @logger.error "logstash-input-multirds set_logfile_record  exception \n#{e}"
+    end
+    out
   end
 
   def register
