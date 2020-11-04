@@ -175,7 +175,7 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
 
         # start reading log data at the marker
         more = true
-        marker = rec[:marker]
+        marker = rec['marker']
         while more
           rsp = @rds.download_db_log_file_portion(
             db_instance_identifier: log[:db_instance_identifier],
