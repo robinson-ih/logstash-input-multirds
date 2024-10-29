@@ -1,6 +1,6 @@
 Gem::Specification.new do |s|
   s.name          = 'logstash-input-multirds'
-  s.version       = '0.1.1'
+  s.version       = '0.1.2'
   s.summary       = 'Ingest RDS log files to Logstash with competing consumers and multiple databases'
 
   s.authors       = ['Robert Labrie']
@@ -16,8 +16,8 @@ Gem::Specification.new do |s|
 
   # Gem dependencies
   s.add_runtime_dependency 'logstash-codec-plain'
-  s.add_runtime_dependency 'logstash-core-plugin-api', '~> 2.0'
-  s.add_runtime_dependency 'logstash-mixin-aws'
+  s.add_runtime_dependency 'logstash-core-plugin-api', '>= 2.1.12', '<= 2.99'
+  s.add_runtime_dependency 'logstash-integration-aws'
   s.add_runtime_dependency 'stud', '>= 0.0.22'
-  s.add_development_dependency 'logstash-devutils', '>= 0.0.16'
+  s.add_development_dependency 'logstash-devutils'
 end
