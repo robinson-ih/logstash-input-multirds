@@ -1,12 +1,11 @@
 require 'logstash/inputs/base'
 require 'logstash/namespace'
 require 'stud/interval'
-require 'aws-sdk'
-require 'logstash/inputs/multirds/patch'
+require 'aws-sdk-dynamodb'
+require 'aws-sdk-rds'
 require 'logstash/plugin_mixins/aws_config'
 require 'time'
 require 'socket'
-Aws.eager_autoload!
 
 class LogStash::Inputs::Multirds < LogStash::Inputs::Base
   include LogStash::PluginMixins::AwsConfig::V2

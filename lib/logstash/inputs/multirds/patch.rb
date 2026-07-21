@@ -1,12 +1,1 @@
-require 'aws-sdk'
-
-begin
-  old_stderr = $stderr
-  $stderr = StringIO.new
-
-  module Aws
-    const_set(:RDS, Aws::RDS)
-  end
-ensure
-  $stderr = old_stderr
-end
+# No-op: aws-sdk-rds provides Aws::RDS directly; the v2 autoload workaround is no longer needed.
