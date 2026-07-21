@@ -22,11 +22,16 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
 
   def ensure_lock_table(db, table)
     begin
-      tables = db.list_tables({
+      # list_tables paginates: follow exclusive_start_table_name until no marker
+      table_names = []
+      resp = db.list_tables
+      loop do
+        table_names.concat(resp.table_names)
+        break unless resp.last_evaluated_table_name
+        resp = db.list_tables(exclusive_start_table_name: resp.last_evaluated_table_name)
+      end
+      return true if table_names.include?(table)
 
-                              })
-      return true if tables.to_h[:table_names].to_a.include?(table)
-      # TODO: there is a potential race condition here where a table could come back in list_tables but not be in ACTIVE state we should check this better
       db.create_table(
         table_name: table,
         key_schema: [
@@ -61,6 +66,7 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
     end
     false
   end
+
   def acquire_lock(db, table, id, lock_owner, expire_time)
     begin
       db.update_item(
@@ -82,27 +88,39 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
       return false
     rescue StandardError => e
       @logger.error "logstash-input-multirds acquire_lock exception\n #{e}"
-      false
+      return false
     end
     true
   end
 
   def get_logfile_list(rds, instance_pattern, logfile_pattern)
+    instance_re = Regexp.new(instance_pattern)
+    logfile_re  = Regexp.new(logfile_pattern)
+
     log_files = []
     begin
-      dbs = rds.describe_db_instances
-      dbs.to_h[:db_instances].each do |db|
-        next unless db[:db_instance_identifier] =~ /#{instance_pattern}/
-        logs = rds.describe_db_log_files(
-          db_instance_identifier: db[:db_instance_identifier]
-        )
+      # paginate describe_db_instances to handle accounts with > 100 instances
+      marker = nil
+      loop do
+        opts = marker ? { marker: marker } : {}
+        dbs = rds.describe_db_instances(opts)
+        dbs.to_h[:db_instances].each do |db|
+          next unless db[:db_instance_identifier] =~ instance_re
+          logs = rds.describe_db_log_files(
+            db_instance_identifier: db[:db_instance_identifier]
+          )
 
-        logs.to_h[:describe_db_log_files].each do |log|
-          next unless log[:log_file_name] =~ /#{logfile_pattern}/
-          log[:db_instance_identifier] = db[:db_instance_identifier]
-          log_files.push(log)
+          logs.to_h[:describe_db_log_files].each do |log|
+            next unless log[:log_file_name] =~ logfile_re
+            log[:db_instance_identifier] = db[:db_instance_identifier]
+            log_files.push(log)
+          end
         end
+        marker = dbs.to_h[:marker]
+        break unless marker
       end
+    rescue RegexpError => e
+      @logger.error "logstash-input-multirds get_logfile_list invalid pattern: #{e}"
     rescue StandardError => e
       @logger.error "logstash-input-multirds get_logfile_list instance_pattern: #{instance_pattern} logfile_pattern:#{logfile_pattern} exception \n#{e}"
     end
@@ -110,7 +128,7 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
   end
 
   def get_logfile_record(db, id, tablename)
-    out = {}
+    out = { 'marker' => '0:0' }
     begin
       res = db.get_item(
         key: {
@@ -118,8 +136,7 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
         },
         table_name: tablename
       )
-      extra_fields = { 'marker' => '0:0' }
-      out = extra_fields.merge(res.item)
+      out = out.merge(res.item) if res.item
     rescue StandardError => e
       @logger.error "logstash-input-multirds get_logfile_record  exception \n#{e}"
     end
@@ -128,7 +145,7 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
 
   def set_logfile_record(db, id, tablename, key, value)
     begin
-    out = db.update_item(
+      db.update_item(
         key: {
           id: id
         },
@@ -142,7 +159,6 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
     rescue StandardError => e
       @logger.error "logstash-input-multirds set_logfile_record  exception \n#{e}"
     end
-    out
   end
 
   def register
@@ -181,7 +197,7 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
             log_file_name: log[:log_file_name],
             marker: marker
           )
-          rsp[:log_file_data].lines.each do |line|
+          (rsp[:log_file_data] || '').lines.each do |line|
             @codec.decode(line) do |event|
               decorate event
               event.set 'rds_instance', log[:db_instance_identifier]
@@ -199,6 +215,6 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
   end
 
   def stop
-    Stud.stop! @thread
+    Stud.stop! @thread if @thread
   end
 end
