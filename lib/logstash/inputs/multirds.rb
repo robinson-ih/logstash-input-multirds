@@ -168,6 +168,10 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
     @db = Aws::DynamoDB::Client.new aws_options_hash
     @rds = Aws::RDS::Client.new aws_options_hash
 
+    # per-log-file codec instances, keyed by "instance:logfile", persist across poll cycles
+    # so multiline buffers survive poll boundaries on live growing log files
+    @codecs = {}
+
     @ready = ensure_lock_table @db, @group_name
   end
 
@@ -179,18 +183,37 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
     @thread = Thread.current
     Stud.interval(@polling_frequency) do
       logs = get_logfile_list @rds, @instance_name_pattern, @log_file_name_pattern
+      active_ids = logs.map { |log| "#{log[:db_instance_identifier]}:#{log[:log_file_name]}" }
+
+      # flush and evict codecs for log files that have rotated out of the active list
+      (@codecs.keys - active_ids).each do |stale_id|
+        stale_instance, stale_logfile = stale_id.split(':', 2)
+        stale = @codecs.delete(stale_id)
+        stale.flush do |event|
+          decorate event
+          event.set 'rds_instance', stale_instance
+          event.set 'log_file', stale_logfile
+          queue << event
+        end
+      end
 
       logs.each do |log|
         id = "#{log[:db_instance_identifier]}:#{log[:log_file_name]}"
+
         lock = acquire_lock @db, @group_name, id, @client_id, (@polling_frequency - 1)
         next unless lock # we won't do anything with the data unless we get a lock on the file
 
         rec = get_logfile_record @db, id, @group_name
-        next unless rec['marker'].split(':')[1].to_i < log[:size].to_i # No new data in the log file so just continue
+        marker_val = rec['marker'] || '0:0'
+        next unless marker_val.split(':')[1].to_i < log[:size].to_i
+
+        # reuse the codec for this log file across poll cycles so multiline buffers
+        # survive poll boundaries; a fresh clone is created only on first encounter
+        codec = @codecs[id] ||= @codec.clone
 
         # start reading log data at the marker
         more = true
-        marker = rec['marker']
+        marker = marker_val
         while more
           rsp = @rds.download_db_log_file_portion(
             db_instance_identifier: log[:db_instance_identifier],
@@ -198,7 +221,7 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
             marker: marker
           )
           (rsp[:log_file_data] || '').lines.each do |line|
-            @codec.decode(line) do |event|
+            codec.decode(line) do |event|
               decorate event
               event.set 'rds_instance', log[:db_instance_identifier]
               event.set 'log_file', log[:log_file_name]
@@ -209,7 +232,7 @@ class LogStash::Inputs::Multirds < LogStash::Inputs::Base
           marker = rsp[:marker]
         end
         # set the marker back in the lock table
-        set_logfile_record @db, id, @group_name, 'marker', marker
+        set_logfile_record @db, id, @group_name, 'marker', marker if marker
       end
     end
   end
